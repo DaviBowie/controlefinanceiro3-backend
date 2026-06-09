@@ -1,0 +1,115 @@
+// Prisma schema - Controle Financeiro
+// Docs: https://pris.ly/d/prisma-schema
+//
+// Notas de modelagem:
+//  - Valores monetarios usam Decimal(12,2) (nunca Float, para evitar erros de arredondamento).
+//  - Datas de granularidade "dia" (data, vencimento, ...) sao guardadas como String "YYYY-MM-DD",
+//    igual ao que o frontend produz, evitando problemas de fuso horario na fronteira do dia.
+//  - Os booleanos (pago, recebido, recorrente) substituem o "Sim"/"Nao" do frontend antigo;
+//    a camada de API do frontend faz a traducao.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Receita {
+  id        Int      @id @default(autoincrement())
+  data      String // YYYY-MM-DD
+  descricao String
+  valor     Decimal  @db.Decimal(12, 2)
+  categoria String
+  forma     String
+  recebido  Boolean  @default(true)
+  obs       String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("receitas")
+}
+
+model Despesa {
+  id        Int      @id @default(autoincrement())
+  data      String // YYYY-MM-DD
+  descricao String
+  valor     Decimal  @db.Decimal(12, 2)
+  categoria String
+  forma     String
+  pago      Boolean  @default(true)
+  parcela   String   @default("")
+  obs       String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("despesas")
+}
+
+model ContaReceber {
+  id         Int      @id @default(autoincrement())
+  devedor    String
+  vencimento String // YYYY-MM-DD
+  valor      Decimal  @db.Decimal(12, 2)
+  descricao  String   @default("")
+  recebidoEm String? // null = ainda pendente
+  forma      String
+  obs        String   @default("")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("contas_receber")
+}
+
+model ContaPagar {
+  id         Int      @id @default(autoincrement())
+  credor     String
+  vencimento String // YYYY-MM-DD
+  valor      Decimal  @db.Decimal(12, 2)
+  descricao  String   @default("")
+  pagoEm     String? // null = ainda pendente
+  forma      String
+  recorrente Boolean  @default(false)
+  obs        String   @default("")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("contas_pagar")
+}
+
+model Investimento {
+  id         Int      @id @default(autoincrement())
+  ativo      String
+  tipo       String
+  dataCompra String // YYYY-MM-DD
+  aportado   Decimal  @db.Decimal(12, 2)
+  valorAtual Decimal  @db.Decimal(12, 2)
+  vencimento String   @default("")
+  obs        String   @default("")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("investimentos")
+}
+
+// Categorias extra criadas pelo utilizador (alem das fixas no codigo).
+model Categoria {
+  id   Int    @id @default(autoincrement())
+  nome String
+  tipo String // "despesa" | "receita"
+
+  @@unique([nome, tipo])
+  @@map("categorias")
+}
+
+// Sessoes de conversa com a IA (mantem o historico por chat).
+model Chat {
+  id        String   @id @default(cuid())
+  messages  Json     @default("[]")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("chats")
+}
