@@ -1,41 +1,38 @@
 import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import Groq from 'groq-sdk';
-import { PrismaService } from '../prisma/prisma.service';
+import { Chat, ChatMessage } from './chat.entity';
 import { IaContextService } from './ia-context.service';
 
-interface ChatMessage {
-  role: 'user' | 'assistant';
-  content: string;
-}
+const SYSTEM_PROMPT = `És o Jarvis, um assistente financeiro pessoal especialista, direto e honesto.
+Respondes sempre em português do Brasil, com base nos dados financeiros reais do utilizador
+que te são fornecidos no contexto. Usa números concretos, evita conselhos genéricos e
+nunca inventes dados que não estejam no contexto.`;
 
-const SYSTEM_PROMPT = `Es o Jarvis, um assistente financeiro pessoal especialista, direto e honesto.
-Respondes sempre em portugues do Brasil, com base nos dados financeiros reais do utilizador
-que te sao fornecidos no contexto. Usa numeros concretos, evita conselhos genericos e
-nunca inventes dados que nao estejam no contexto.`;
+const ANALISE_PROMPT = `Analisa os meus dados financeiros e fornece uma análise completa e
+personalizada em português do Brasil, estruturada exatamente com estas secções em markdown:
 
-const ANALISE_PROMPT = `Analisa os meus dados financeiros e fornece uma analise completa e
-personalizada em portugues do Brasil, estruturada exatamente com estas seccoes em markdown:
-
-## Diagnostico Geral
-Avalia a saude financeira atual de forma direta e honesta.
+## Diagnóstico Geral
+Avalia a saúde financeira atual de forma direta e honesta.
 
 ## Pontos Positivos
 Lista o que estou a fazer bem.
 
 ## Alertas e Riscos
-Identifica problemas, gastos excessivos, padroes preocupantes.
+Identifica problemas, gastos excessivos, padrões preocupantes.
 
-## Padroes Detectados
+## Padrões Detectados
 Identifica sazonalidade, categorias que crescem, comportamentos recorrentes.
 
-## Recomendacoes Prioritarias
-Lista de 3 a 5 acoes concretas que devo tomar agora.
+## Recomendações Prioritárias
+Lista de 3 a 5 ações concretas que devo tomar agora.
 
-## Projecao
-Com base nos dados, projeta a situacao financeira em 3 e 6 meses.
+## Projeção
+Com base nos dados, projeta a situação financeira em 3 e 6 meses.
 
-Se direto, usa numeros reais e evita conselhos genericos.`;
+Sê direto, usa números reais e evita conselhos genéricos.`;
 
 @Injectable()
 export class IaService {
@@ -44,33 +41,29 @@ export class IaService {
   private readonly model: string;
 
   constructor(
+    @InjectRepository(Chat)
+    private readonly chatRepo: Repository<Chat>,
     private readonly config: ConfigService,
-    private readonly prisma: PrismaService,
     private readonly context: IaContextService,
   ) {
-    this.groq = new Groq({
-      apiKey: this.config.get<string>('GROQ_API_KEY'),
-    });
-    this.model = this.config.get<string>(
-      'GROQ_MODEL',
-      'llama-3.3-70b-versatile',
-    );
+    this.groq = new Groq({ apiKey: this.config.get<string>('GROQ_API_KEY') });
+    this.model = this.config.get<string>('GROQ_MODEL', 'llama-3.3-70b-versatile');
   }
 
-  /** Cria uma nova sessao de chat e devolve o seu id. */
-  async createChat(): Promise<{ id: string }> {
-    const chat = await this.prisma.chat.create({ data: {} });
-    return { id: chat.id };
+  async createChat(userId: number): Promise<{ id: string }> {
+    const chat = this.chatRepo.create({ messages: [], userId });
+    const saved = await this.chatRepo.save(chat);
+    return { id: saved.id };
   }
 
-  /**
-   * Responde a uma pergunta do utilizador. O backend recolhe o contexto
-   * financeiro da BD e junta-o ao historico da sessao antes de chamar a Groq.
-   */
-  async chat(message: string, chatId?: string): Promise<{ response: string; chatId: string }> {
-    const id = chatId ?? (await this.createChat()).id;
-    const history = await this.loadHistory(id);
-    const contexto = await this.context.build();
+  async chat(
+    message: string,
+    userId: number,
+    chatId?: string,
+  ): Promise<{ response: string; chatId: string }> {
+    const id = chatId ?? (await this.createChat(userId)).id;
+    const history = await this.loadHistory(id, userId);
+    const contexto = await this.context.build(userId);
 
     const response = await this.complete([
       { role: 'system', content: SYSTEM_PROMPT },
@@ -79,7 +72,7 @@ export class IaService {
       { role: 'user', content: message },
     ]);
 
-    await this.saveHistory(id, [
+    await this.saveHistory(id, userId, [
       ...history,
       { role: 'user', content: message },
       { role: 'assistant', content: response },
@@ -88,17 +81,14 @@ export class IaService {
     return { response, chatId: id };
   }
 
-  /** Gera a analise financeira completa a partir dos dados na BD. */
-  async analise(): Promise<{ response: string }> {
-    const contexto = await this.context.build();
+  async analise(userId: number): Promise<{ response: string }> {
+    const contexto = await this.context.build(userId);
     const response = await this.complete([
       { role: 'system', content: SYSTEM_PROMPT },
       { role: 'user', content: `${ANALISE_PROMPT}\n\n${contexto}` },
     ]);
     return { response };
   }
-
-  // --- helpers ---
 
   private async complete(
     messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
@@ -113,27 +103,22 @@ export class IaService {
     } catch (err) {
       this.logger.error('Falha ao chamar a API da Groq', err as Error);
       throw new ServiceUnavailableException(
-        'Nao foi possivel contactar o servico de IA. Verifica a GROQ_API_KEY.',
+        'Não foi possível contactar o serviço de IA. Verifica a GROQ_API_KEY.',
       );
     }
   }
 
-  private async loadHistory(chatId: string): Promise<ChatMessage[]> {
-    const chat = await this.prisma.chat.findUnique({ where: { id: chatId } });
-    const raw = (chat?.messages as unknown as ChatMessage[]) ?? [];
-    // Limita o historico para nao estourar o limite de tokens.
-    return raw.slice(-10);
+  private async loadHistory(chatId: string, userId: number): Promise<ChatMessage[]> {
+    const chat = await this.chatRepo.findOneBy({ id: chatId, userId });
+    return (chat?.messages ?? []).slice(-10);
   }
 
   private async saveHistory(
     chatId: string,
+    userId: number,
     messages: ChatMessage[],
   ): Promise<void> {
-    await this.prisma.chat.upsert({
-      where: { id: chatId },
-      // Guarda apenas as ultimas 20 mensagens.
-      update: { messages: messages.slice(-20) as object },
-      create: { id: chatId, messages: messages.slice(-20) as object },
-    });
+    const trimmed = messages.slice(-20);
+    await this.chatRepo.upsert({ id: chatId, userId, messages: trimmed }, ['id']);
   }
 }

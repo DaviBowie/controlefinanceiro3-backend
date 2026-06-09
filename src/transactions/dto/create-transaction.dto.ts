@@ -1,15 +1,19 @@
 import {
   IsBoolean,
   IsDateString,
+  IsEnum,
   IsNumber,
   IsOptional,
   IsString,
   MaxLength,
   Min,
 } from 'class-validator';
+import { TransactionType } from '../transaction.entity';
 
-export class CreateDespesaDto {
-  // Aceita "YYYY-MM-DD" (formato ISO de data) vindo do frontend.
+export class CreateTransactionDto {
+  @IsEnum(TransactionType)
+  type: TransactionType;
+
   @IsDateString()
   data: string;
 
@@ -22,14 +26,16 @@ export class CreateDespesaDto {
   valor: number;
 
   @IsString()
+  @MaxLength(100)
   categoria: string;
 
   @IsString()
+  @MaxLength(50)
   forma: string;
 
   @IsOptional()
   @IsBoolean()
-  pago?: boolean;
+  status?: boolean;
 
   @IsOptional()
   @IsString()

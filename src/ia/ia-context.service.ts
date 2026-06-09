@@ -1,79 +1,70 @@
 import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { Transaction, TransactionType } from '../transactions/transaction.entity';
+import { Bill, BillType } from '../bills/bill.entity';
+import { Investment } from '../investments/investment.entity';
 
 const fmt = (v: number) =>
   v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 
-/**
- * Recolhe TODOS os dados financeiros diretamente da base de dados e monta um
- * bloco de texto com o contexto que e enviado ao modelo de IA.
- *
- * Isto e o cerne da nova arquitetura: o frontend ja nao constroi o contexto
- * nem conhece os dados todos -- o backend e a fonte da verdade.
- */
 @Injectable()
 export class IaContextService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    @InjectRepository(Transaction)
+    private readonly transactions: Repository<Transaction>,
+    @InjectRepository(Bill)
+    private readonly bills: Repository<Bill>,
+    @InjectRepository(Investment)
+    private readonly investments: Repository<Investment>,
+  ) {}
 
-  async build(): Promise<string> {
-    const [receitas, despesas, receber, pagar, investimentos] =
-      await Promise.all([
-        this.prisma.receita.findMany(),
-        this.prisma.despesa.findMany(),
-        this.prisma.contaReceber.findMany(),
-        this.prisma.contaPagar.findMany(),
-        this.prisma.investimento.findMany(),
-      ]);
+  async build(userId: number): Promise<string> {
+    const [receitas, despesas, receber, pagar, investimentos] = await Promise.all([
+      this.transactions.findBy({ type: TransactionType.RECEITA, userId }),
+      this.transactions.findBy({ type: TransactionType.DESPESA, userId }),
+      this.bills.findBy({ type: BillType.RECEBER, userId }),
+      this.bills.findBy({ type: BillType.PAGAR, userId }),
+      this.investments.findBy({ userId }),
+    ]);
 
-    const num = (v: unknown) => Number(v);
-
-    const totalRec = receitas.reduce((s, r) => s + num(r.valor), 0);
-    const totalDesp = despesas.reduce((s, d) => s + num(d.valor), 0);
-    const totalInv = investimentos.reduce((s, i) => s + num(i.valorAtual), 0);
-    const totalAport = investimentos.reduce((s, i) => s + num(i.aportado), 0);
+    const totalRec = receitas.reduce((s, r) => s + r.valor, 0);
+    const totalDesp = despesas.reduce((s, d) => s + d.valor, 0);
+    const totalInv = investimentos.reduce((s, i) => s + i.valorAtual, 0);
+    const totalAport = investimentos.reduce((s, i) => s + i.aportado, 0);
     const saldo = totalRec - totalDesp;
     const taxaPoup = totalRec > 0 ? ((saldo / totalRec) * 100).toFixed(1) : '0';
 
-    // Despesas por categoria (ordenadas da maior para a menor).
     const porCategoria = Object.entries(
       despesas.reduce<Record<string, number>>((acc, d) => {
-        acc[d.categoria] = (acc[d.categoria] ?? 0) + num(d.valor);
+        acc[d.categoria] = (acc[d.categoria] ?? 0) + d.valor;
         return acc;
       }, {}),
     )
       .filter(([, total]) => total > 0)
       .sort((a, b) => b[1] - a[1]);
 
-    // Historico mensal (mes 1..12) com base no campo "data" (YYYY-MM-DD).
-    const mes = (data: string) => Number(data?.slice(5, 7)) || 0;
+    const mesNum = (data: string) => Number(data?.slice(5, 7)) || 0;
     const porMes = Array.from({ length: 12 }, (_, i) => i + 1)
       .map((m) => ({
         mes: m,
-        receitas: receitas
-          .filter((r) => mes(r.data) === m)
-          .reduce((s, r) => s + num(r.valor), 0),
-        despesas: despesas
-          .filter((d) => mes(d.data) === m)
-          .reduce((s, d) => s + num(d.valor), 0),
+        receitas: receitas.filter((r) => mesNum(r.data) === m).reduce((s, r) => s + r.valor, 0),
+        despesas: despesas.filter((d) => mesNum(d.data) === m).reduce((s, d) => s + d.valor, 0),
       }))
       .filter((m) => m.receitas > 0 || m.despesas > 0);
 
     const hoje = new Date().toISOString().slice(0, 10);
-    const vencidos = pagar.filter(
-      (p) => !p.pagoEm && p.vencimento < hoje,
-    ).length;
-    const aReceber = receber
-      .filter((r) => !r.recebidoEm)
-      .reduce((s, r) => s + num(r.valor), 0);
+    const vencidos = pagar.filter((p) => !p.liquidadoEm && p.vencimento < hoje).length;
+    const aReceber = receber.filter((r) => !r.liquidadoEm).reduce((s, r) => s + r.valor, 0);
 
     return [
       'DADOS FINANCEIROS DO UTILIZADOR (em R$):',
       '',
       'RESUMO GERAL:',
-      `- Total de Receitas: ${fmt(totalRec)} (${receitas.length} lancamentos)`,
-      `- Total de Despesas: ${fmt(totalDesp)} (${despesas.length} lancamentos)`,
+      `- Total de Receitas: ${fmt(totalRec)} (${receitas.length} lançamentos)`,
+      `- Total de Despesas: ${fmt(totalDesp)} (${despesas.length} lançamentos)`,
       `- Saldo: ${fmt(saldo)}`,
-      `- Taxa de Poupanca: ${taxaPoup}%`,
+      `- Taxa de Poupança: ${taxaPoup}%`,
       `- Carteira de Investimentos (valor atual): ${fmt(totalInv)} | Aportado: ${fmt(totalAport)} | Rendimento: ${fmt(totalInv - totalAport)}`,
       `- Contas a Receber (pendentes): ${fmt(aReceber)}`,
       `- Contas vencidas a pagar: ${vencidos}`,
@@ -84,28 +75,25 @@ export class IaContextService {
           `- ${cat}: ${fmt(total)} (${totalDesp > 0 ? ((total / totalDesp) * 100).toFixed(1) : 0}% do total)`,
       ),
       '',
-      'HISTORICO MENSAL:',
+      'HISTÓRICO MENSAL:',
       ...porMes.map(
         (m) =>
-          `- Mes ${m.mes}: Receitas ${fmt(m.receitas)} | Despesas ${fmt(m.despesas)} | Saldo ${fmt(m.receitas - m.despesas)}`,
+          `- Mês ${m.mes}: Receitas ${fmt(m.receitas)} | Despesas ${fmt(m.despesas)} | Saldo ${fmt(m.receitas - m.despesas)}`,
       ),
       '',
       'INVESTIMENTOS:',
       ...(investimentos.length
         ? investimentos.map(
             (i) =>
-              `- ${i.ativo} (${i.tipo}): Aportado ${fmt(num(i.aportado))}, Atual ${fmt(num(i.valorAtual))}, Rendimento ${fmt(num(i.valorAtual) - num(i.aportado))}`,
+              `- ${i.ativo} (${i.tipo}): Aportado ${fmt(i.aportado)}, Atual ${fmt(i.valorAtual)}, Rendimento ${fmt(i.valorAtual - i.aportado)}`,
           )
         : ['Nenhum investimento cadastrado']),
       '',
-      'ULTIMAS DESPESAS:',
+      'ÚLTIMAS DESPESAS:',
       ...despesas
         .slice(-15)
         .reverse()
-        .map(
-          (d) =>
-            `- ${d.data} | ${d.descricao} | ${fmt(num(d.valor))} | ${d.categoria}`,
-        ),
+        .map((d) => `- ${d.data} | ${d.descricao} | ${fmt(d.valor)} | ${d.categoria}`),
     ].join('\n');
   }
 }
